@@ -1,0 +1,4 @@
+experiment,chunk_size,questions_evaluated,hits_at_5,recall_at_5
+Vector baseline - 250 tokens,250,25,25,1.0000
+Vector baseline - 500 tokens,500,25,25,1.0000
+Vector baseline - 1000 tokens,1000,25,25,1.0000

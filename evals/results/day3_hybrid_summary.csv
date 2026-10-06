@@ -1,0 +1,2 @@
+experiment,chunk_size,questions_evaluated,hits_at_5,recall_at_5
+BM25 hybrid - Reciprocal Rank Fusion,250,25,25,1.0000
