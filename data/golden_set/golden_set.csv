@@ -1,0 +1,31 @@
+question_id,question,gold_answer,source_file,source_page,answerability
+Q001,How many paid annual leave days does an employee receive per calendar year?,18 paid annual leave days.,HR_Leave_Policy.pdf,1,answerable
+Q002,How many days of unused annual leave can be carried forward?,Up to 5 days.,HR_Leave_Policy.pdf,1,answerable
+Q003,When is a medical certificate required for sick leave?,When sick leave lasts more than 2 consecutive working days.,HR_Sick_Leave_Policy.pdf,1,answerable
+Q004,How many weeks of paid parental leave are available to eligible employees?,16 weeks.,HR_Parental_Leave_Policy.pdf,1,answerable
+Q005,How many days per week may an eligible employee work remotely?,Up to 3 days per week.,HR_Remote_Work_Policy.pdf,1,answerable
+Q006,What is the standard probation period for new employees?,6 months.,HR_Probation_Policy.pdf,1,answerable
+Q007,What rate is approved overtime compensated at?,1.5 times the employee's standard hourly rate.,HR_Overtime_Policy.pdf,1,answerable
+Q008,What is the minimum password length?,At least 12 characters.,IT_Password_Standard.pdf,1,answerable
+Q009,Is multi-factor authentication required for corporate email?,"Yes, it is required for all corporate email accounts.",IT_MFA_Policy.pdf,1,answerable
+Q010,What encryption must company laptops use?,Full-disk encryption.,IT_Device_Policy.pdf,1,answerable
+Q011,Where must employees request unapproved software?,Through the IT service portal.,IT_Software_Request_Policy.pdf,1,answerable
+Q012,What should employees do with a compromised device when instructed by IT?,Disconnect it from the network.,IT_Incident_Response_Policy.pdf,1,answerable
+Q013,How often is critical production data backed up?,Daily.,IT_Backup_Standard.pdf,1,answerable
+Q014,How often are access rights reviewed?,Every 6 months.,SEC_Access_Control_Policy.pdf,1,answerable
+Q015,How should employees report suspected phishing messages?,Using the Report Phishing button in corporate email.,SEC_Phishing_Policy.pdf,1,answerable
+Q016,Who is confidential data intended to be accessible to?,Authorized users with appropriate access controls based on sensitivity.,SEC_Data_Classification_Policy.pdf,1,answerable
+Q017,What is the receipt threshold for individual expenses?,"Receipts are required above ₹1,000.",FIN_Expense_Policy.pdf,1,answerable
+Q018,What is the standard travel class for domestic business air travel?,Economy class.,FIN_Travel_Policy.pdf,1,answerable
+Q019,At what purchase amount is a purchase order required?,"Above ₹50,000.",FIN_Procurement_Policy.pdf,1,answerable
+Q020,How often are approved employee reimbursements processed?,Twice each month.,FIN_Reimbursement_Policy.pdf,1,answerable
+Q021,What are the standard working hours?,"9:30 AM to 6:30 PM, Monday through Friday.",OPS_Working_Hours_Policy.pdf,1,answerable
+Q022,What must visitors do when entering the office?,Sign in at reception.,OPS_Visitor_Policy.pdf,1,answerable
+Q023,How quickly must damaged company equipment be reported?,Within one business day.,OPS_Equipment_Use_Policy.pdf,1,answerable
+Q024,How long are financial records retained?,7 years.,LEGAL_Record_Retention_Policy.pdf,1,answerable
+Q025,When must customer contracts be reviewed by Legal?,Before signature.,LEGAL_Contract_Review_Policy.pdf,1,answerable
+Q026,What is the company's policy on personal email forwarding limits?,,,,unanswerable
+Q027,What is the annual employee performance bonus percentage?,,,,unanswerable
+Q028,How many paid vacation days are provided after 10 years of service?,,,,unanswerable
+Q029,What is the maximum amount an employee can spend on a business lunch without approval?,,,,unanswerable
+Q030,Which programming language does the company require for internal automation?,,,,unanswerable
