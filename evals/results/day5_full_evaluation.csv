@@ -1,0 +1,32 @@
+metric,question_id,answerability,result,details
+retrieval_recall_at_5,,answerable,25/25,100.00%
+generation,Q001,answerable,True,"Employees receive 18 paid annual leave days per calendar year. [Source: HR_Leave_Policy.pdf, page 1]"
+generation,Q002,answerable,True,"Up to 5 days. [Source: HR_Leave_Policy.pdf, page 1]"
+generation,Q003,answerable,True,"A medical certificate is required when sick leave lasts more than 2 consecutive working days. [Source: HR_Sick_Leave_Policy.pdf, page 1]"
+generation,Q004,answerable,True,"Employees are entitled to 16 weeks of parental leave. [Source: HR_Parental_Leave_Policy.pdf, page 1]"
+generation,Q005,answerable,True,"Up to 3 days per week. [Source: HR_Remote_Work_Policy.pdf, page 1]"
+generation,Q006,answerable,True,"The standard probation period for new employees is 6 months. [Source: HR_Probation_Policy.pdf, page 1]"
+generation,Q007,answerable,True,"Approved overtime is compensated at 1.5 times the employee's standard hourly rate. [Source: HR_Overtime_Policy.pdf, page 1]"
+generation,Q008,answerable,True,"Passwords must be at least 12 characters long. [Source: IT_Password_Standard.pdf, page 1]"
+generation,Q009,answerable,True,"Multi-factor authentication is required for all corporate email accounts. [Source: IT_MFA_Policy.pdf, page 1]"
+generation,Q010,answerable,True,"Company laptops must use full-disk encryption. [Source: IT_Device_Policy.pdf, page 1]"
+generation,Q011,answerable,True,"Employees must request unapproved software through the IT service portal. [Source: IT_Software_Request_Policy.pdf, page 1]"
+generation,Q012,answerable,True,"Disconnect it from the network. [Source: IT_Incident_Response_Policy.pdf, page 1]"
+generation,Q013,answerable,True,"Daily. [Source: IT_Backup_Standard.pdf, page 1]"
+generation,Q014,answerable,True,"Access rights must be reviewed every 6 months. [Source: SEC_Access_Control_Policy.pdf, page 1]"
+generation,Q015,answerable,True,"Employees must report suspected phishing messages using the Report Phishing button in corporate email. [Source: SEC_Phishing_Policy.pdf, page 1]"
+generation,Q016,answerable,True,"Employees and approved contractors may access confidential data with appropriate access controls based on sensitivity. [Source: SEC_Data_Classification_Policy.pdf, page 1]"
+generation,Q017,answerable,True,"Receipts are required above ₹1,000. [Source: FIN_Expense_Policy.pdf, page 1]"
+generation,Q018,answerable,True,"Economy class is required for domestic business air travel. [Source: FIN_Travel_Policy.pdf, page 1]"
+generation,Q019,answerable,True,"Above ₹50,000. [Source: FIN_Procurement_Policy.pdf, page 1]"
+generation,Q020,answerable,True,"Reimbursements are processed twice each month. [Source: FIN_Reimbursement_Policy.pdf, page 1]"
+generation,Q021,answerable,True,"9:30 AM to 6:30 PM, Monday through Friday. [Source: OPS_Working_Hours_Policy.pdf, page 1]"
+generation,Q022,answerable,True,"All visitors must sign in at reception. [Source: OPS_Visitor_Policy.pdf, page 1]"
+generation,Q023,answerable,True,"Within one business day. [Source: OPS_Equipment_Use_Policy.pdf, page 1]"
+generation,Q024,answerable,True,"Financial records must be retained for 7 years. [Source: LEGAL_Record_Retention_Policy.pdf, page 1]"
+generation,Q025,answerable,True,"Contracts must be reviewed by Legal before signature. [Source: LEGAL_Contract_Review_Policy.pdf, page 1]"
+generation,Q026,unanswerable,True,I don't know based on the provided company documents. The available documents do not provide sufficient evidence to answer this question.
+generation,Q027,unanswerable,True,I don't know based on the provided company documents. The available documents do not provide sufficient evidence to answer this question.
+generation,Q028,unanswerable,True,I don't know based on the provided company documents. The available documents do not provide sufficient evidence to answer this question.
+generation,Q029,unanswerable,True,I don't know based on the provided company documents. The available documents do not provide sufficient evidence to answer this question.
+generation,Q030,unanswerable,True,I don't know based on the provided company documents. The available documents do not provide sufficient evidence to answer this question.
