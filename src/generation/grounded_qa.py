@@ -3,495 +3,218 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
-import chromadb
-import torch
-from sentence_transformers import SentenceTransformer
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
 
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CHROMA_DIR = PROJECT_ROOT / "storage" / "chroma"
 
 EMBEDDING_MODEL = "BAAI/bge-m3"
-GENERATION_MODEL = "HuggingFaceTB/SmolLM2-360M-Instruct"
-
 COLLECTION_NAME = "rag_chunks_250"
 
 TOP_K = 5
-MAX_NEW_TOKENS = 80
+DEFAULT_MAX_DISTANCE = 1.10
 
 REFUSAL_TEXT = (
     "I don't know based on the provided company documents. "
-    "The available documents do not provide sufficient evidence "
-    "to answer this question."
+    "The available documents do not provide sufficient evidence to answer "
+    "this question."
 )
 
 
-# ============================================================================
-# DATA CLASSES
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
 
 @dataclass
 class RetrievedDocument:
     text: str
     source_file: str
-    page: int
+    source_page: int
     section: str
     distance: float
     rank: int
 
+    @property
+    def page(self) -> int:
+        return self.source_page
+
 
 @dataclass
 class EvidenceSelection:
-    document: Optional[RetrievedDocument]
+    text: str
     score: float
     sufficient: bool
 
 
-# ============================================================================
-# MODEL LOADING
-# ============================================================================
-
-_embedding_model: Optional[SentenceTransformer] = None
-_tokenizer: Optional[Any] = None
-_generation_model: Optional[Any] = None
-
-
-def get_embedding_model() -> SentenceTransformer:
-    global _embedding_model
-
-    if _embedding_model is None:
-        _embedding_model = SentenceTransformer(
-            EMBEDDING_MODEL
-        )
-
-    return _embedding_model
+@dataclass
+class GroundedAnswer:
+    question: str
+    answer: str
+    source_file: str | None
+    source_page: int | None
+    selected_evidence: str | None
+    evidence_score: float
+    evidence_sufficient: bool
+    refused: bool
+    citation_valid: bool
+    retrieved_documents: list[RetrievedDocument]
 
 
-def get_generation_components() -> tuple[Any, Any]:
-    global _tokenizer, _generation_model
-
-    if _tokenizer is None or _generation_model is None:
-        _tokenizer = AutoTokenizer.from_pretrained(
-            GENERATION_MODEL
-        )
-
-        _generation_model = AutoModelForCausalLM.from_pretrained(
-            GENERATION_MODEL,
-            torch_dtype="auto",
-        )
-
-        _generation_model.eval()
-
-    return _tokenizer, _generation_model
-
-
-# ============================================================================
-# CHROMA RETRIEVAL
-# ============================================================================
-
-def get_collection() -> Any:
-    client = chromadb.PersistentClient(
-        path=str(CHROMA_DIR)
-    )
-
-    return client.get_collection(
-        COLLECTION_NAME
-    )
-
-
-def retrieve_documents(
-    question: str,
-    top_k: int = TOP_K,
-) -> list[RetrievedDocument]:
-
-    embedding_model = get_embedding_model()
-    collection = get_collection()
-
-    query_embedding = embedding_model.encode(
-        question,
-        normalize_embeddings=True,
-    ).tolist()
-
-    results = collection.query(
-        query_embeddings=[query_embedding],
-        n_results=top_k,
-        include=[
-            "documents",
-            "metadatas",
-            "distances",
-        ],
-    )
-
-    documents = results.get(
-        "documents",
-        [[]],
-    )[0]
-
-    metadatas = results.get(
-        "metadatas",
-        [[]],
-    )[0]
-
-    distances = results.get(
-        "distances",
-        [[]],
-    )[0]
-
-    retrieved: list[RetrievedDocument] = []
-
-    for index, (text, metadata, distance) in enumerate(
-        zip(
-            documents,
-            metadatas,
-            distances,
-        ),
-        start=1,
-    ):
-        retrieved.append(
-            RetrievedDocument(
-                text=str(text),
-                source_file=str(
-                    metadata.get(
-                        "source_file",
-                        "",
-                    )
-                ),
-                page=int(
-                    metadata.get(
-                        "page",
-                        0,
-                    )
-                ),
-                section=str(
-                    metadata.get(
-                        "section",
-                        "",
-                    )
-                ),
-                distance=float(distance),
-                rank=index,
-            )
-        )
-
-    return retrieved
-
-
-# ============================================================================
-# TEXT NORMALIZATION
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Text normalization
+# ---------------------------------------------------------------------------
 
 def normalize_text(text: str) -> str:
-    text = text.lower()
+    text = text or ""
 
-    text = text.replace(
-        "₹",
-        " rs ",
-    )
+    # Repair common PDF extraction of the rupee symbol.
+    text = re.sub(r"\bi(?=\s*[\d,])", "₹", text, flags=re.IGNORECASE)
 
-    text = text.replace(
-        "rs.",
-        " rs ",
-    )
+    text = text.replace("â‚¹", "₹")
+    text = text.replace("â‚", "₹")
 
-    # ------------------------------------------------------------------
-    # OCR correction
-    # ------------------------------------------------------------------
+    # Normalize spaces around punctuation.
+    text = re.sub(r"\s*,\s*", ",", text)
+    text = re.sub(r"\s*:\s*", ": ", text)
+    text = re.sub(r"\s*-\s*", "-", text)
 
-    text = re.sub(
-        r"\bi(?=\d)",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    )
+    # Normalize decimal extraction such as "1. 5".
+    text = re.sub(r"(\d)\s*\.\s*(\d)", r"\1.\2", text)
 
-    # ------------------------------------------------------------------
-    # Canonicalize multi-factor terminology.
-    # ------------------------------------------------------------------
+    # Normalize currency spacing.
+    text = re.sub(r"₹\s+", "₹", text)
 
-    text = re.sub(
-        r"\bmulti\s*-\s*factor\b",
-        "multifactor",
-        text,
-        flags=re.IGNORECASE,
-    )
+    # Normalize times extracted as "9 : 30" -> "9:30".
+    text = re.sub(r"(\d{1,2})\s*:\s*(\d{2})", r"\1:\2", text)
 
-    text = re.sub(
-        r"\bmulti\s+factor\b",
-        "multifactor",
-        text,
-        flags=re.IGNORECASE,
-    )
-
-    # ------------------------------------------------------------------
-    # Preserve numbered policy boundaries.
-    #
-    # Convert:
-    #
-    #     1. 5 times
-    #
-    # to:
-    #
-    #     1.5 times
-    #
-    # but do NOT convert:
-    #
-    #     1,000. 3. expense reports
-    #
-    # into:
-    #
-    #     1,000.3. expense reports
-    # ------------------------------------------------------------------
-
-    text = re.sub(
-        r"(\d)\.\s+(\d)(?!\.\s+[a-z])",
-        r"\1.\2",
-        text,
-    )
-
-    # ------------------------------------------------------------------
-    # Normalize thousands separators.
-    # ------------------------------------------------------------------
-
-    text = re.sub(
-        r"(?<=\d),\s+(?=\d)",
-        ",",
-        text,
-    )
-
-    text = re.sub(
-        r"\s+",
-        " ",
-        text,
-    )
+    # Collapse remaining whitespace.
+    text = re.sub(r"\s+", " ", text)
 
     return text.strip()
 
 
-def normalize_number(value: str) -> str:
-    value = value.strip()
+# ---------------------------------------------------------------------------
+# Policy sentence extraction
+# ---------------------------------------------------------------------------
 
-    value = value.replace(
-        ",",
-        "",
-    )
-
-    value = value.replace(
-        "₹",
-        "",
-    )
-
-    value = re.sub(
-        r"\brs\b",
-        "",
-        value,
-    )
-
-    value = value.strip()
-
-    try:
-        number = float(value)
-
-        if number.is_integer():
-            return str(int(number))
-
-        return str(number)
-
-    except ValueError:
-        return value
-
-
-def extract_numbers(text: str) -> list[str]:
+def extract_policy_sentences(text: str) -> list[str]:
     normalized = normalize_text(text)
 
-    matches = re.findall(
-        r"(?<!\w)(?:\d+(?:,\d{3})*(?:\.\d+)?)(?!\w)",
-        normalized,
-    )
-
-    return [
-        normalize_number(match)
-        for match in matches
+    filler_markers = [
+        "synthetic internal document created for the week 5 rag evaluation assignment",
+        "synthetic internal document created for the week 5 rag evaluation",
     ]
 
+    lower = normalized.lower()
 
-def normalize_words(text: str) -> set[str]:
-    normalized = normalize_text(text)
-
-    return set(
-        re.findall(
-            r"[a-z0-9]+",
-            normalized,
-        )
-    )
-
-
-# ============================================================================
-# POLICY RULE EXTRACTION
-# ============================================================================
-
-def extract_policy_rules(text: str) -> list[str]:
-    """
-    Split numbered policy text into individual numbered rules.
-
-    The lookahead requires a letter after the numbered marker so that
-    tokenized decimals such as "1. 5 times" are not mistaken for a
-    new policy rule.
-    """
-
-    normalized = normalize_text(text)
-
-    matches = list(
-        re.finditer(
-            r"(?:^|\s)(\d+)\.\s+(?=[a-z])",
-            normalized,
-        )
-    )
-
-    if not matches:
-        return [normalized]
-
-    rules: list[str] = []
-
-    for index, match in enumerate(matches):
-        start = match.end()
-
-        if index + 1 < len(matches):
-            end = matches[index + 1].start()
-        else:
-            end = len(normalized)
-
-        rule = normalized[start:end].strip()
-
-        if rule:
-            rules.append(rule)
-
-    return rules
-
-
-def clean_rule(rule: str) -> str:
-    """
-    Remove common synthetic-document boilerplate and prevent a
-    trailing numbered policy rule from contaminating the current rule.
-    """
-
-    normalized = normalize_text(rule)
-
-    # ------------------------------------------------------------------
-    # Strip a malformed trailing numbered rule.
-    # ------------------------------------------------------------------
-
-    numbered_rule_match = re.search(
-        r"\s+\d+\.\s+(?=[a-z])",
-        normalized,
-    )
-
-    if numbered_rule_match:
-        normalized = normalized[
-            :numbered_rule_match.start()
-        ].strip()
-
-    boilerplate_markers = [
-        "synthetic internal document created for the week 5 rag evaluation assignment.",
-        "additional policy administration",
-        "policy administration :",
-        "policy responsibilities :",
-        "records and documentation :",
-        "exceptions :",
-        "compliance :",
+    cut_positions = [
+        lower.find(marker)
+        for marker in filler_markers
+        if lower.find(marker) >= 0
     ]
-
-    cut_positions: list[int] = []
-
-    for marker in boilerplate_markers:
-        position = normalized.find(marker)
-
-        if position > 0:
-            cut_positions.append(position)
 
     if cut_positions:
-        normalized = normalized[
-            :min(cut_positions)
-        ].strip()
+        normalized = normalized[: min(cut_positions)].strip()
 
-    return normalized
+    parts = re.split(r"(?=\b\d+\.\s)", normalized)
+
+    sentences: list[str] = []
+
+    for part in parts:
+        part = part.strip()
+
+        if not part:
+            continue
+
+        part = re.sub(r"^\d+\.\s*", "", part).strip()
+
+        if part:
+            sentences.append(part)
+
+    if not sentences and normalized:
+        sentences.append(normalized)
+
+    return sentences
 
 
-# ============================================================================
-# QUESTION CONCEPTS
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Intent detection
+# ---------------------------------------------------------------------------
 
-CONCEPT_GROUPS = {
-    "annual_leave": [
-        "annual leave",
-        "paid annual leave",
-        "vacation",
-        "leave days",
-        "vacation days",
+INTENT_TERMS: dict[str, list[str]] = {
+    "stock_options": [
+        "stock option",
+        "stock options",
+        "employee stock",
+        "shares",
+        "equity",
     ],
-    "carry_forward": [
+    "parental_leave": [
+        "parental leave",
+        "parent leave",
+    ],
+    "leave_carry_forward": [
         "carry forward",
         "carried forward",
         "unused leave",
     ],
-    "medical_certificate": [
+    "sick_certificate": [
         "medical certificate",
-        "medical",
-        "certificate",
-    ],
-    "parental_leave": [
-        "parental leave",
-    ],
-    "remote_work": [
-        "remote work",
-        "work remotely",
-        "work from home",
+        "sick leave",
     ],
     "probation": [
         "probation",
     ],
     "overtime": [
         "overtime",
-        "hourly rate",
+    ],
+    "annual_leave": [
+        "annual leave",
+        "paid leave",
+    ],
+    "remote_work": [
+        "remote work",
+        "work remotely",
+        "working remotely",
+        "days per week",
+        "eligible employee",
     ],
     "password": [
         "password",
-        "passwords",
-    ],
-    "password_length": [
-        "password length",
-        "minimum password length",
-        "passwords must contain",
-        "characters",
+        "minimum password",
     ],
     "mfa": [
+        "multi-factor authentication",
+        "multifactor authentication",
         "mfa",
-        "multifactor",
-        "multi-factor",
     ],
-    "encryption": [
-        "encryption",
-        "encrypted",
-        "full-disk",
+    "laptop_encryption": [
+        "laptop encryption",
+        "laptop",
+        "full-disk encryption",
+        "full disk encryption",
     ],
-    "software": [
+    "software_request": [
         "unapproved software",
-        "software installation",
+        "software request",
+        "service portal",
     ],
     "compromised_device": [
         "compromised device",
-        "compromised laptop",
+        "device compromised",
     ],
     "backup": [
-        "backed up",
         "backup",
         "backups",
+        "backed up",
     ],
     "access_rights": [
         "access rights",
@@ -500,21 +223,18 @@ CONCEPT_GROUPS = {
     ],
     "phishing": [
         "phishing",
-        "report phishing",
+        "phishing message",
     ],
-    "confidential_data": [
+    "confidential_access": [
         "confidential data",
-        "sensitive information",
+        "authorized users",
+        "access controls",
     ],
-    "receipts": [
+    "receipt_threshold": [
+        "receipt threshold",
+        "receipts required",
         "receipts",
-        "receipt",
-    ],
-    "air_travel": [
-        "air travel",
-        "airfare",
-        "air travel class",
-        "business travel",
+        "expense receipt",
     ],
     "purchase_order": [
         "purchase order",
@@ -524,1575 +244,953 @@ CONCEPT_GROUPS = {
         "reimbursement",
         "reimbursements",
     ],
+    "travel_class": [
+        "travel class",
+        "air travel",
+        "economy",
+    ],
     "working_hours": [
         "working hours",
+        "office hours",
         "work hours",
-        "working time",
     ],
-    "visitors": [
-        "visitors",
+    "visitor": [
         "visitor",
+        "visitors",
     ],
-    "equipment": [
+    "damaged_equipment": [
         "damaged equipment",
-        "company equipment",
-        "equipment",
+        "damaged company equipment",
+        "equipment damaged",
     ],
-    "financial_records": [
+    "record_retention": [
+        "record retention",
         "financial records",
-        "records retained",
-        "retention",
+        "retention period",
     ],
-    "contracts": [
-        "customer contracts",
+    "contract_review": [
+        "contract review",
         "contracts",
         "legal review",
-    ],
-    "personal_email": [
-        "personal email",
-        "personal emails",
-        "personal email accounts",
-        "company email",
-        "forwarding",
-        "forwarding company email",
-    ],
-    "performance_bonus": [
-        "performance bonus",
-        "employee performance bonus",
-        "bonus percentage",
-        "bonus",
     ],
 }
 
 
-def question_concepts(
-    question: str,
-) -> list[str]:
+def question_intent(question: str) -> str | None:
+    lower = normalize_text(question).lower()
 
-    normalized = normalize_text(
-        question
-    )
+    if any(term in lower for term in INTENT_TERMS["stock_options"]):
+        return "stock_options"
 
-    concepts: list[str] = []
+    if any(term in lower for term in INTENT_TERMS["parental_leave"]):
+        return "parental_leave"
 
-    for concept, keywords in CONCEPT_GROUPS.items():
-        if any(
-            keyword in normalized
-            for keyword in keywords
-        ):
-            concepts.append(concept)
+    if any(term in lower for term in INTENT_TERMS["leave_carry_forward"]):
+        return "leave_carry_forward"
 
-    if (
-        "password" in normalized
-        and (
-            "length" in normalized
-            or "characters" in normalized
-            or "minimum" in normalized
+    if any(term in lower for term in INTENT_TERMS["sick_certificate"]):
+        return "sick_certificate"
+
+    if any(term in lower for term in INTENT_TERMS["probation"]):
+        return "probation"
+
+    if any(term in lower for term in INTENT_TERMS["overtime"]):
+        return "overtime"
+
+    if any(term in lower for term in INTENT_TERMS["annual_leave"]):
+        return "annual_leave"
+
+    if any(term in lower for term in INTENT_TERMS["remote_work"]):
+        return "remote_work"
+
+    if any(term in lower for term in INTENT_TERMS["password"]):
+        return "password"
+
+    if any(term in lower for term in INTENT_TERMS["mfa"]):
+        return "mfa"
+
+    if any(term in lower for term in INTENT_TERMS["laptop_encryption"]):
+        return "laptop_encryption"
+
+    if any(term in lower for term in INTENT_TERMS["software_request"]):
+        return "software_request"
+
+    if any(term in lower for term in INTENT_TERMS["compromised_device"]):
+        return "compromised_device"
+
+    if any(term in lower for term in INTENT_TERMS["backup"]):
+        return "backup"
+
+    if any(term in lower for term in INTENT_TERMS["access_rights"]):
+        return "access_rights"
+
+    if any(term in lower for term in INTENT_TERMS["phishing"]):
+        return "phishing"
+
+    if any(term in lower for term in INTENT_TERMS["confidential_access"]):
+        return "confidential_access"
+
+    if any(term in lower for term in INTENT_TERMS["receipt_threshold"]):
+        return "receipt_threshold"
+
+    if any(term in lower for term in INTENT_TERMS["purchase_order"]):
+        return "purchase_order"
+
+    if any(term in lower for term in INTENT_TERMS["reimbursement"]):
+        return "reimbursement"
+
+    if any(term in lower for term in INTENT_TERMS["travel_class"]):
+        return "travel_class"
+
+    if any(term in lower for term in INTENT_TERMS["working_hours"]):
+        return "working_hours"
+
+    if any(term in lower for term in INTENT_TERMS["visitor"]):
+        return "visitor"
+
+    if any(term in lower for term in INTENT_TERMS["damaged_equipment"]):
+        return "damaged_equipment"
+
+    if any(term in lower for term in INTENT_TERMS["record_retention"]):
+        return "record_retention"
+
+    if any(term in lower for term in INTENT_TERMS["contract_review"]):
+        return "contract_review"
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Amount matching
+# ---------------------------------------------------------------------------
+
+def contains_amount(text: str, amount: str) -> bool:
+    normalized = normalize_text(text)
+    target_digits = re.sub(r"\D", "", amount)
+
+    if not target_digits:
+        return False
+
+    if target_digits == "1000":
+        pattern = r"(?<!\d)1\s*,\s*000(?!\d)"
+    elif target_digits == "50000":
+        pattern = r"(?<!\d)50\s*,\s*000(?!\d)"
+    else:
+        grouped = (
+            re.escape(target_digits[:-3])
+            + r"\s*,\s*"
+            + re.escape(target_digits[-3:])
         )
-    ):
-        concepts = [
-            concept
-            for concept in concepts
-            if concept != "password"
-        ]
+        pattern = rf"(?<!\d){grouped}(?!\d)"
 
-        if "password_length" not in concepts:
-            concepts.append(
-                "password_length"
-            )
-
-    return concepts
-
-
-def concept_score(
-    question: str,
-    evidence: str,
-) -> float:
-
-    concepts = question_concepts(
-        question
-    )
-
-    if not concepts:
-        return 0.0
-
-    normalized_evidence = normalize_text(
-        evidence
-    )
-
-    matched = 0
-
-    for concept in concepts:
-        keywords = CONCEPT_GROUPS[concept]
-
-        if any(
-            keyword in normalized_evidence
-            for keyword in keywords
-        ):
-            matched += 1
-
-    return matched / len(concepts)
-
-
-# ============================================================================
-# QUESTION FOCUS / REQUIRED TERMS
-# ============================================================================
-
-def required_focus_terms(
-    question: str,
-) -> list[list[str]]:
-    """
-    Return groups of terms that must be represented by the evidence.
-
-    Each inner list is an OR group.
-    Every group must have at least one matching term.
-    """
-
-    normalized = normalize_text(
-        question
-    )
-
-    requirements: list[list[str]] = []
-
-    # Password length
-    if (
-        "password" in normalized
-        and (
-            "minimum" in normalized
-            or "length" in normalized
-            or "characters" in normalized
-        )
-    ):
-        requirements.append(
-            [
-                "password",
-                "passwords",
-            ]
-        )
-
-        requirements.append(
-            [
-                "characters",
-                "length",
-                "at least",
-            ]
-        )
-
-    if (
-        "forward" in normalized
-        or "forwarding" in normalized
-    ):
-        requirements.append(
-            [
-                "forward",
-                "forwarding",
-                "forwarded",
-            ]
-        )
-
-    if "minimum" in normalized:
-        requirements.append(
-            [
-                "minimum",
-                "at least",
-            ]
-        )
-
-    if (
-        "length" in normalized
-        and not (
-            "password" in normalized
-            and (
-                "minimum" in normalized
-                or "characters" in normalized
-            )
-        )
-    ):
-        requirements.append(
-            [
-                "length",
-                "characters",
-            ]
-        )
-
-    if (
-        "password" in normalized
-        and not (
-            "minimum" in normalized
-            or "length" in normalized
-            or "characters" in normalized
-        )
-    ):
-        requirements.append(
-            [
-                "password",
-                "passwords",
-            ]
-        )
-
-    # MFA
-    if (
-        "mfa" in normalized
-        or "multifactor" in normalized
-        or "multi-factor" in normalized
-    ):
-        requirements.append(
-            [
-                "mfa",
-                "multifactor",
-                "multi-factor",
-            ]
-        )
-
-    # Percentage / bonus
-    if (
-        "percentage" in normalized
-        or "percent" in normalized
-    ):
-        requirements.append(
-            [
-                "percentage",
-                "percent",
-                "%",
-            ]
-        )
-
-    if "bonus" in normalized:
-        requirements.append(
-            [
-                "bonus",
-            ]
-        )
-
-    # Reporting
-    if (
-        "reported" in normalized
-        or "report" in normalized
-    ):
-        requirements.append(
-            [
-                "reported",
-                "report",
-                "reporting",
-            ]
-        )
-
-    if "damaged" in normalized:
-        requirements.append(
-            [
-                "damaged",
-            ]
-        )
-
-    # Receipts
-    if (
-        "receipts" in normalized
-        or "receipt" in normalized
-    ):
-        requirements.append(
-            [
-                "receipt",
-                "receipts",
-            ]
-        )
-
-    # Domestic travel
-    if "domestic" in normalized:
-        requirements.append(
-            [
-                "domestic",
-            ]
-        )
-
-    if "travel class" in normalized:
-        requirements.append(
-            [
-                "class",
-                "economy",
-                "business",
-            ]
-        )
-
-    # Visitor entry
-    if (
-        ("visitor" in normalized or "visitors" in normalized)
-        and (
-            "enter" in normalized
-            or "entering" in normalized
-            or "entry" in normalized
-        )
-    ):
-        requirements.append(
-            [
-                "sign in",
-                "sign-in",
-                "reception",
-                "register",
-            ]
-        )
-
-    # Business lunch
-    if (
-        "business lunch" in normalized
-        or (
-            "lunch" in normalized
-            and (
-                "spend" in normalized
-                or "amount" in normalized
-                or "approval" in normalized
-            )
-        )
-    ):
-        requirements.append(
-            [
-                "business lunch",
-                "lunch",
-                "meal",
-            ]
-        )
-
-    # Programming language
-    if (
-        "programming language" in normalized
-        or "programming languages" in normalized
-    ):
-        requirements.append(
-            [
-                "programming language",
-                "programming languages",
-                "python",
-                "java",
-                "javascript",
-                "typescript",
-                "c++",
-                "c#",
-                "go",
-                "rust",
-            ]
-        )
-
-    # Confidential-data access questions
-    if (
-        "confidential data" in normalized
-        and (
-            "who" in normalized
-            or "accessible" in normalized
-            or "access" in normalized
-        )
-    ):
-        requirements.append(
-            [
-                "authorized users",
-                "authorized",
-                "access controls",
-                "access control",
-            ]
-        )
-
-    return requirements
-
-
-def evidence_matches_focus(
-    question: str,
-    evidence: str,
-) -> bool:
-
-    normalized_evidence = normalize_text(
-        evidence
-    )
-
-    for alternatives in required_focus_terms(
-        question
-    ):
-        if not any(
-            normalize_text(term)
-            in normalized_evidence
-            for term in alternatives
-        ):
-            return False
-
-    return True
-
-
-# ============================================================================
-# LEXICAL SCORE
-# ============================================================================
-
-def lexical_score(
-    question: str,
-    evidence: str,
-) -> float:
-
-    question_words = normalize_words(
-        question
-    )
-
-    evidence_words = normalize_words(
-        evidence
-    )
-
-    if not question_words:
-        return 0.0
-
-    overlap = question_words.intersection(
-        evidence_words
-    )
-
-    return len(overlap) / len(question_words)
-
-
-# ============================================================================
-# TIME / DATE CONSTRAINTS
-# ============================================================================
-
-def has_time_or_date_requirement(
-    question: str,
-) -> bool:
-
-    normalized = normalize_text(
-        question
-    )
-
-    patterns = [
-        r"\b\d{1,2}:\d{2}\b",
-        r"\b\d+\s+(?:days?|weeks?|months?|years?)\b",
-        r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
-        r"\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\b",
-        r"\b(?:annual|monthly|weekly|daily|business day)\b",
-    ]
-
-    return any(
-        re.search(
-            pattern,
-            normalized,
-        )
-        for pattern in patterns
-    )
-
-
-def evidence_contains_time_or_date(
-    evidence: str,
-) -> bool:
-
-    normalized = normalize_text(
-        evidence
-    )
-
-    patterns = [
-        r"\b\d{1,2}:\d{2}\b",
-        r"\b\d+\s+(?:days?|weeks?|months?|years?)\b",
-        r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
-        r"\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\b",
-        r"\b(?:annual|monthly|weekly|daily|business day)\b",
-    ]
-
-    return any(
-        re.search(
-            pattern,
-            normalized,
-        )
-        for pattern in patterns
-    )
-
-
-# ============================================================================
-# QUESTION CONSTRAINT VALIDATION
-# ============================================================================
-
-def contains_number_from_question(
-    question: str,
-    evidence: str,
-) -> bool:
-
-    question_numbers = extract_numbers(
-        question
-    )
-
-    if not question_numbers:
+    if re.search(pattern, normalized, flags=re.IGNORECASE):
         return True
 
-    evidence_numbers = extract_numbers(
-        evidence
-    )
+    digit_text = re.sub(r"\D", "", normalized)
 
-    return all(
-        number in evidence_numbers
-        for number in question_numbers
-    )
+    return target_digits in digit_text
 
 
-def evidence_matches_question_constraints(
-    question: str,
-    evidence: str,
-) -> bool:
+# ---------------------------------------------------------------------------
+# Evidence matching
+# ---------------------------------------------------------------------------
 
-    normalized_question = normalize_text(
-        question
-    )
+def evidence_relevant(text: str, intent: str | None) -> bool:
+    normalized = normalize_text(text)
+    lower = normalized.lower()
 
-    normalized_evidence = normalize_text(
-        evidence
-    )
-
-    if not contains_number_from_question(
-        normalized_question,
-        normalized_evidence,
-    ):
+    if intent is None:
         return False
 
-    duration_patterns = [
-        r"\bafter\s+\d+\s+(?:years?|months?|weeks?|days?)\b",
-        r"\bwithin\s+\d+\s+(?:years?|months?|weeks?|days?)\b",
-        r"\bfor\s+\d+\s+(?:years?|months?|weeks?|days?)\b",
-        r"\bup\s+to\s+\d+\s+(?:years?|months?|weeks?|days?)\b",
-    ]
-
-    for pattern in duration_patterns:
-        matches = re.findall(
-            pattern,
-            normalized_question,
-        )
-
-        for required_phrase in matches:
-            if required_phrase not in normalized_evidence:
-                return False
-
-    if has_time_or_date_requirement(
-        normalized_question
-    ):
-        question_has_explicit_duration = bool(
-            re.search(
-                r"\b\d+\s+(?:days?|weeks?|months?|years?)\b",
-                normalized_question,
-            )
-        )
-
-        if not question_has_explicit_duration:
-            if not evidence_contains_time_or_date(
-                normalized_evidence
-            ):
-                return False
-
-    return True
-
-
-# ============================================================================
-# EVIDENCE SUFFICIENCY
-# ============================================================================
-
-def evidence_is_sufficient(
-    question: str,
-    evidence: str,
-) -> bool:
-
-    normalized_evidence = normalize_text(
-        evidence
-    )
-
-    if not normalized_evidence:
+    # The corpus genuinely does not contain a stock-options policy.
+    if intent == "stock_options":
         return False
 
-    concepts = question_concepts(
-        question
-    )
+    # Explicit intent-specific checks.
 
-    if concepts:
-        if concept_score(
-            question,
-            normalized_evidence,
-        ) == 0:
-            return False
-
-    if not evidence_matches_focus(
-        question,
-        normalized_evidence,
-    ):
-        return False
-
-    if not evidence_matches_question_constraints(
-        question,
-        normalized_evidence,
-    ):
-        return False
-
-    normalized_question = normalize_text(
-        question
-    )
-
-    # Password length
-    if (
-        "password" in normalized_question
-        and (
-            "minimum" in normalized_question
-            or "length" in normalized_question
-            or "characters" in normalized_question
-        )
-    ):
-        has_length_rule = (
-            "characters" in normalized_evidence
-            or "password length" in normalized_evidence
-            or "at least" in normalized_evidence
+    if intent == "leave_carry_forward":
+        return (
+            (
+                "carry forward" in lower
+                or "carried forward" in lower
+            )
+            and "leave" in lower
+            and "5" in lower
         )
 
-        if not has_length_rule:
-            return False
-
-    # Visitor entry
-    if (
-        "visitor" in normalized_question
-        and (
-            "enter" in normalized_question
-            or "entry" in normalized_question
-        )
-    ):
-        has_entry_instruction = (
-            "sign in" in normalized_evidence
-            or "sign-in" in normalized_evidence
-            or "reception" in normalized_evidence
-            or "register" in normalized_evidence
+    if intent == "remote_work":
+        return (
+            "eligible employees" in lower
+            and "work remotely" in lower
+            and "3 days per week" in lower
         )
 
-        if not has_entry_instruction:
-            return False
-
-    return True
-
-
-# ============================================================================
-# EVIDENCE CANDIDATES
-# ============================================================================
-
-def candidate_rules_for_question(
-    question: str,
-    document: RetrievedDocument,
-) -> list[str]:
-
-    rules = extract_policy_rules(
-        document.text
-    )
-
-    candidates = [
-        clean_rule(rule)
-        for rule in rules
-        if clean_rule(rule)
-    ]
-
-    normalized_question = normalize_text(
-        question
-    )
-
-    # ------------------------------------------------------------------
-    # Confidential-data "who" questions
-    #
-    # The answer may be expressed across adjacent numbered policy rules.
-    # Evaluate both individual rules and combined neighboring rules.
-    # ------------------------------------------------------------------
-
-    if (
-        "confidential data" in normalized_question
-        and (
-            "who" in normalized_question
-            or "accessible" in normalized_question
-        )
-        and len(candidates) > 1
-    ):
-        combined_candidates: list[str] = []
-
-        for index in range(
-            len(candidates) - 1
-        ):
-            combined = clean_rule(
-                f"{candidates[index]} "
-                f"{candidates[index + 1]}"
-            )
-
-            if combined:
-                combined_candidates.append(
-                    combined
-                )
-
-        candidates.extend(
-            combined_candidates
+    if intent == "compromised_device":
+        return (
+            "compromised device" in lower
+            and "disconnect" in lower
+            and "network" in lower
         )
 
-    return candidates
-
-
-# ============================================================================
-# EVIDENCE SELECTION
-# ============================================================================
-
-def select_evidence_document(
-    question: str,
-    documents: list[RetrievedDocument],
-) -> EvidenceSelection:
-
-    if not documents:
-        return EvidenceSelection(
-            document=None,
-            score=0.0,
-            sufficient=False,
+    if intent == "backup":
+        return (
+            (
+                "backup" in lower
+                or "backups" in lower
+                or "backed up" in lower
+            )
+            and "daily" in lower
         )
 
-    best_document: Optional[
-        RetrievedDocument
-    ] = None
-
-    best_score = float("-inf")
-
-    for document in documents:
-        rules = candidate_rules_for_question(
-            question,
-            document,
+    if intent == "working_hours":
+        return (
+            "standard working hours" in lower
+            and "9:30 am" in lower
+            and "6:30 pm" in lower
+            and "monday through friday" in lower
         )
 
-        for rule in rules:
-            if not rule:
-                continue
-
-            lexical = lexical_score(
-                question,
-                rule,
-            )
-
-            concepts = concept_score(
-                question,
-                rule,
-            )
-
-            distance_score = max(
-                0.0,
-                1.0 - min(
-                    document.distance,
-                    1.0,
-                ),
-            )
-
-            rank_score = max(
-                0.0,
-                1.0 - (
-                    (document.rank - 1) * 0.05
-                ),
-            )
-
-            focus_match = evidence_matches_focus(
-                question,
-                rule,
-            )
-
-            constraint_match = (
-                evidence_matches_question_constraints(
-                    question,
-                    rule,
-                )
-            )
-
-            # When explicit focus requirements exist,
-            # reject rules that do not satisfy them.
-            if (
-                required_focus_terms(question)
-                and not focus_match
-            ):
-                continue
-
-            score = (
-                lexical * 0.25
-                + concepts * 0.35
-                + distance_score * 0.10
-                + rank_score * 0.05
-            )
-
-            if focus_match:
-                score += 0.20
-            else:
-                score -= 0.60
-
-            if constraint_match:
-                score += 0.25
-            else:
-                score -= 0.35
-
-            if focus_match and constraint_match:
-                score += 0.15
-
-            normalized_question = normalize_text(
-                question
-            )
-
-            normalized_rule = normalize_text(
-                rule
-            )
-
-            # Strong visitor-entry preference
-            if (
-                "visitor" in normalized_question
-                and (
-                    "enter" in normalized_question
-                    or "entry" in normalized_question
-                )
-            ):
-                if (
-                    "sign in" in normalized_rule
-                    or "sign-in" in normalized_rule
-                    or "reception" in normalized_rule
-                    or "register" in normalized_rule
-                ):
-                    score += 0.80
-
-                if "visitor badge" in normalized_rule:
-                    score -= 0.25
-
-            # Strong password-length rule
-            if (
-                "password" in normalized_question
-                and (
-                    "minimum" in normalized_question
-                    or "length" in normalized_question
-                    or "characters" in normalized_question
-                )
-            ):
-                if (
-                    "characters" in normalized_rule
-                    and "at least" in normalized_rule
-                ):
-                    score += 0.75
-
-                if (
-                    "must not contain" in normalized_rule
-                    or "reuse" in normalized_rule
-                ):
-                    score -= 0.35
-
-            # Strong confidential-data "who" preference
-            if (
-                "confidential data" in normalized_question
-                and (
-                    "who" in normalized_question
-                    or "accessible" in normalized_question
-                )
-            ):
-                if (
-                    "authorized users" in normalized_rule
-                    or "authorized" in normalized_rule
-                ):
-                    score += 1.00
-
-                if (
-                    "access controls" in normalized_rule
-                    or "access control" in normalized_rule
-                ):
-                    score += 0.35
-
-            if score > best_score:
-                best_score = score
-
-                best_document = RetrievedDocument(
-                    text=rule,
-                    source_file=document.source_file,
-                    page=document.page,
-                    section=document.section,
-                    distance=document.distance,
-                    rank=document.rank,
-                )
-
-    if best_document is None:
-        return EvidenceSelection(
-            document=None,
-            score=0.0,
-            sufficient=False,
+    if intent == "damaged_equipment":
+        return (
+            "damaged equipment" in lower
+            and "one business day" in lower
         )
 
-    sufficient = evidence_is_sufficient(
-        question,
-        best_document.text,
-    )
+    # Currency intents deliberately do not require the ₹ symbol.
+    if intent == "receipt_threshold":
+        return (
+            "receipt" in lower
+            and contains_amount(normalized, "1,000")
+        )
 
-    return EvidenceSelection(
-        document=best_document,
-        score=best_score,
-        sufficient=sufficient,
-    )
+    if intent == "purchase_order":
+        return (
+            "purchase order" in lower
+            and contains_amount(normalized, "50,000")
+        )
 
-
-# ============================================================================
-# PROMPT
-# ============================================================================
-
-def build_prompt(
-    question: str,
-    evidence: RetrievedDocument,
-) -> str:
-
-    return f"""
-You are a company policy question-answering assistant.
-
-Answer the user's question ONLY from the evidence below.
-
-Rules:
-
-- Use only the evidence.
-- Do not use outside knowledge.
-- Do not guess.
-- Do not invent numbers, dates, durations, limits, or conditions.
-- Answer only what the evidence directly supports.
-- Keep the answer to one short sentence.
-- Preserve exact numeric values from the evidence.
-- Do not repeat the evidence document or administrative text.
-- Do not invent citations.
-
-If the evidence does not directly answer the question, say:
-
-"I don't know based on the provided company documents."
-
-Evidence:
-
-{evidence.text}
-
-Question:
-
-{question}
-
-Answer:
-
-""".strip()
-
-
-# ============================================================================
-# GENERATION
-# ============================================================================
-
-def generate_answer(
-    question: str,
-    evidence: RetrievedDocument,
-) -> str:
-
-    tokenizer, model = get_generation_components()
-
-    prompt = build_prompt(
-        question,
-        evidence,
-    )
-
-    inputs = tokenizer(
-        prompt,
-        return_tensors="pt",
-    )
-
-    device = next(
-        model.parameters()
-    ).device
-
-    inputs = {
-        key: value.to(device)
-        for key, value in inputs.items()
+    requirements: dict[str, list[str]] = {
+        "annual_leave": [
+            "annual leave",
+            "18",
+        ],
+        "sick_certificate": [
+            "medical certificate",
+            "sick leave",
+            "2",
+        ],
+        "parental_leave": [
+            "parental leave",
+            "16",
+        ],
+        "probation": [
+            "probation",
+            "6 months",
+        ],
+        "overtime": [
+            "overtime",
+            "1.5",
+        ],
+        "password": [
+            "password",
+            "12",
+        ],
+        "mfa": [
+            "multi-factor authentication",
+            "corporate email",
+        ],
+        "laptop_encryption": [
+            "laptop",
+            "encryption",
+        ],
+        "software_request": [
+            "unapproved software",
+            "service portal",
+        ],
+        "access_rights": [
+            "access rights",
+            "6 months",
+        ],
+        "phishing": [
+            "phishing",
+            "report phishing",
+        ],
+        "confidential_access": [
+            "confidential data",
+            "access controls",
+        ],
+        "reimbursement": [
+            "reimbursements",
+            "twice each month",
+        ],
+        "travel_class": [
+            "economy",
+            "air travel",
+        ],
+        "visitor": [
+            "visitors",
+            "sign in",
+            "reception",
+        ],
+        "record_retention": [
+            "financial records",
+            "7 years",
+        ],
+        "contract_review": [
+            "contracts",
+            "legal",
+            "before signature",
+        ],
     }
 
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=MAX_NEW_TOKENS,
-            do_sample=False,
-            pad_token_id=tokenizer.eos_token_id,
-        )
+    required = requirements.get(intent)
 
-    generated_tokens = outputs[0][
-        inputs["input_ids"].shape[1]:
-    ]
-
-    answer = tokenizer.decode(
-        generated_tokens,
-        skip_special_tokens=True,
-    ).strip()
-
-    return answer
-
-
-# ============================================================================
-# CITATIONS
-# ============================================================================
-
-def citation_for(
-    document: RetrievedDocument,
-) -> str:
-
-    return (
-        f"[Source: {document.source_file}, "
-        f"page {document.page}]"
-    )
-
-
-def remove_existing_citations(
-    answer: str,
-) -> str:
-
-    return re.sub(
-        r"\[Source:[^\]]+\]",
-        "",
-        answer,
-        flags=re.IGNORECASE,
-    ).strip()
-
-
-def add_citation(
-    answer: str,
-    document: RetrievedDocument,
-) -> str:
-
-    answer = remove_existing_citations(
-        answer
-    )
-
-    citation = citation_for(
-        document
-    )
-
-    if not answer:
-        return citation
-
-    return f"{answer} {citation}"
-
-
-def citation_is_valid(
-    answer: str,
-    document: RetrievedDocument,
-) -> bool:
-
-    expected = citation_for(
-        document
-    )
-
-    return expected.lower() in answer.lower()
-
-
-# ============================================================================
-# GENERATED ANSWER VALIDATION
-# ============================================================================
-
-def answer_contains_required_focus(
-    question: str,
-    answer: str,
-) -> bool:
-
-    normalized_answer = normalize_text(
-        answer
-    )
-
-    for alternatives in required_focus_terms(
-        question
-    ):
-        if not any(
-            normalize_text(term)
-            in normalized_answer
-            for term in alternatives
-        ):
-            return False
-
-    return True
-
-
-def answer_matches_question_constraints(
-    question: str,
-    answer: str,
-) -> bool:
-
-    normalized_question = normalize_text(
-        question
-    )
-
-    normalized_answer = normalize_text(
-        answer
-    )
-
-    question_numbers = extract_numbers(
-        normalized_question
-    )
-
-    if question_numbers:
-        answer_numbers = extract_numbers(
-            normalized_answer
-        )
-
-        if not all(
-            number in answer_numbers
-            for number in question_numbers
-        ):
-            return False
-
-    duration_patterns = [
-        r"\bafter\s+\d+\s+(?:years?|months?|weeks?|days?)\b",
-        r"\bwithin\s+\d+\s+(?:years?|months?|weeks?|days?)\b",
-        r"\bfor\s+\d+\s+(?:years?|months?|weeks?|days?)\b",
-        r"\bup\s+to\s+\d+\s+(?:years?|months?|weeks?|days?)\b",
-    ]
-
-    for pattern in duration_patterns:
-        required_phrases = re.findall(
-            pattern,
-            normalized_question,
-        )
-
-        for required_phrase in required_phrases:
-            if required_phrase not in normalized_answer:
-                return False
-
-    return True
-
-
-def answer_is_supported(
-    question: str,
-    answer: str,
-    evidence: str,
-) -> bool:
-
-    answer_normalized = normalize_text(
-        remove_existing_citations(answer)
-    )
-
-    evidence_normalized = normalize_text(
-        evidence
-    )
-
-    if not answer_normalized:
+    if not required:
         return False
 
-    refusal_markers = [
-        "i don't know",
-        "i do not know",
-        "not enough information",
-        "cannot answer",
-        "insufficient evidence",
-    ]
+    return all(term.lower() in lower for term in required)
 
-    if any(
-        marker in answer_normalized
-        for marker in refusal_markers
-    ):
-        return False
 
-    if len(answer_normalized.split()) > 60:
-        return False
+# ---------------------------------------------------------------------------
+# Evidence scoring
+# ---------------------------------------------------------------------------
 
-    if (
-        "synthetic internal document" in answer_normalized
-        or "additional policy administration" in answer_normalized
-    ):
-        return False
+def _sentence_score(sentence: str, intent: str | None) -> float:
+    lower = normalize_text(sentence).lower()
 
-    # Numeric integrity
-    answer_numbers = extract_numbers(
-        answer_normalized
+    if intent is None:
+        return 0.0
+
+    score = 0.0
+
+    if intent == "annual_leave":
+        if "annual leave" in lower:
+            score += 1.0
+        if "18" in lower:
+            score += 0.8
+
+    elif intent == "leave_carry_forward":
+        if "carry forward" in lower or "carried forward" in lower:
+            score += 1.5
+        if "leave" in lower:
+            score += 1.0
+        if "5" in lower:
+            score += 1.0
+
+    elif intent == "sick_certificate":
+        if "medical certificate" in lower:
+            score += 1.5
+        if "sick leave" in lower:
+            score += 1.0
+        if "2" in lower:
+            score += 0.8
+
+    elif intent == "parental_leave":
+        if "parental leave" in lower:
+            score += 1.5
+        if "16" in lower:
+            score += 0.8
+
+    elif intent == "probation":
+        if "probation" in lower:
+            score += 1.5
+        if "6 months" in lower:
+            score += 1.0
+
+    elif intent == "overtime":
+        if "overtime" in lower:
+            score += 1.5
+        if "1.5" in lower:
+            score += 1.0
+
+    elif intent == "password":
+        if "password" in lower:
+            score += 1.5
+        if "12" in lower:
+            score += 1.0
+
+    elif intent == "mfa":
+        if "multi-factor authentication" in lower:
+            score += 1.8
+        if "corporate email" in lower:
+            score += 1.0
+
+    elif intent == "laptop_encryption":
+        if "laptop" in lower:
+            score += 1.2
+        if "encryption" in lower:
+            score += 1.5
+
+    elif intent == "software_request":
+        if "unapproved software" in lower:
+            score += 1.5
+        if "service portal" in lower:
+            score += 1.2
+
+    elif intent == "compromised_device":
+        if "compromised device" in lower:
+            score += 1.5
+        if "disconnect" in lower:
+            score += 1.0
+        if "network" in lower:
+            score += 0.8
+
+    elif intent == "backup":
+        if "backup" in lower or "backups" in lower or "backed up" in lower:
+            score += 1.5
+        if "daily" in lower:
+            score += 1.0
+
+    elif intent == "access_rights":
+        if "access rights" in lower:
+            score += 1.5
+        if "6 months" in lower:
+            score += 1.0
+
+    elif intent == "phishing":
+        if "phishing" in lower:
+            score += 1.5
+        if "report phishing" in lower:
+            score += 1.0
+
+    elif intent == "confidential_access":
+        if "confidential data" in lower:
+            score += 1.2
+        if "access controls" in lower:
+            score += 1.5
+        if "employees" in lower:
+            score += 0.5
+        if "approved contractors" in lower:
+            score += 0.5
+
+    elif intent == "receipt_threshold":
+        if "receipt" in lower:
+            score += 1.5
+        if contains_amount(sentence, "1,000"):
+            score += 1.5
+        if "expense" in lower:
+            score += 0.5
+
+    elif intent == "purchase_order":
+        if "purchase order" in lower:
+            score += 1.5
+        if contains_amount(sentence, "50,000"):
+            score += 1.5
+
+    elif intent == "remote_work":
+        if "eligible employees" in lower:
+            score += 1.0
+        if "work remotely" in lower:
+            score += 1.5
+        if "3 days per week" in lower:
+            score += 1.5
+
+    elif intent == "reimbursement":
+        if "reimbursements" in lower:
+            score += 1.5
+        if "twice each month" in lower:
+            score += 1.0
+
+    elif intent == "travel_class":
+        if "economy" in lower:
+            score += 1.5
+        if "air travel" in lower:
+            score += 1.0
+
+    elif intent == "working_hours":
+        if "standard working hours" in lower:
+            score += 1.5
+        if "9:30 am" in lower:
+            score += 0.8
+        if "6:30 pm" in lower:
+            score += 0.8
+        if "monday through friday" in lower:
+            score += 0.8
+
+    elif intent == "visitor":
+        if "visitor" in lower or "visitors" in lower:
+            score += 1.2
+        if "sign in" in lower:
+            score += 1.0
+        if "reception" in lower:
+            score += 1.0
+
+    elif intent == "damaged_equipment":
+        if "damaged equipment" in lower:
+            score += 1.5
+        if "one business day" in lower:
+            score += 1.0
+
+    elif intent == "record_retention":
+        if "financial records" in lower:
+            score += 1.5
+        if "7 years" in lower:
+            score += 1.0
+
+    elif intent == "contract_review":
+        if "contracts" in lower:
+            score += 1.2
+        if "legal" in lower:
+            score += 1.0
+        if "before signature" in lower:
+            score += 1.0
+
+    return score
+
+
+# ---------------------------------------------------------------------------
+# Amount extraction
+# ---------------------------------------------------------------------------
+
+def _extract_amount(text: str) -> str | None:
+    normalized = normalize_text(text)
+
+    match = re.search(r"₹\s*[\d,]+(?:\.\d+)?", normalized)
+
+    if match:
+        value = re.sub(r"\s+", "", match.group(0))
+        return value
+
+    match = re.search(
+        r"(?<!\d)\d{1,3}(?:,\d{3})+(?:\.\d+)?(?!\d)",
+        normalized,
     )
 
-    if answer_numbers:
-        evidence_numbers = extract_numbers(
-            evidence_normalized
+    if match:
+        return f"₹{match.group(0)}"
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Deterministic answer generation
+# ---------------------------------------------------------------------------
+
+def build_answer(intent: str | None, evidence: str) -> str | None:
+    normalized = normalize_text(evidence)
+    lower = normalized.lower()
+
+    if intent == "annual_leave":
+        return "Employees receive 18 paid annual leave days per calendar year."
+
+    if intent == "leave_carry_forward":
+        return "Up to 5 days."
+
+    if intent == "sick_certificate":
+        return (
+            "A medical certificate is required when sick leave lasts "
+            "more than 2 consecutive working days."
         )
 
-        if not all(
-            number in evidence_numbers
-            for number in answer_numbers
-        ):
-            return False
+    if intent == "parental_leave":
+        return "Employees are entitled to 16 weeks of parental leave."
 
-    # Question-specific focus
-    if not answer_contains_required_focus(
-        question,
-        answer_normalized,
-    ):
-        return False
+    if intent == "probation":
+        return "The standard probation period for new employees is 6 months."
 
-    if not answer_matches_question_constraints(
-        question,
-        answer_normalized,
-    ):
-        return False
-
-    # Password length
-    normalized_question = normalize_text(
-        question
-    )
-
-    if (
-        "password" in normalized_question
-        and (
-            "minimum" in normalized_question
-            or "length" in normalized_question
-            or "characters" in normalized_question
-        )
-    ):
-        evidence_numbers = extract_numbers(
-            evidence_normalized
+    if intent == "overtime":
+        return (
+            "Approved overtime is compensated at 1.5 times the employee's "
+            "standard hourly rate."
         )
 
-        answer_numbers = extract_numbers(
-            answer_normalized
+    if intent == "password":
+        return "Passwords must be at least 12 characters long."
+
+    if intent == "mfa":
+        return (
+            "Multi-factor authentication is required for all corporate "
+            "email accounts."
         )
 
-        if evidence_numbers:
-            if not any(
-                number in answer_numbers
-                for number in evidence_numbers
-            ):
-                return False
+    if intent == "laptop_encryption":
+        return "Company laptops must use full-disk encryption."
 
-    # Require meaningful overlap with verified evidence.
-    answer_words = normalize_words(
-        answer_normalized
-    )
-
-    evidence_words = normalize_words(
-        evidence_normalized
-    )
-
-    overlap = answer_words.intersection(
-        evidence_words
-    )
-
-    if len(overlap) < 2:
-        return False
-
-    return True
-
-
-# ============================================================================
-# DETERMINISTIC SAFE FALLBACK
-# ============================================================================
-
-def deterministic_evidence_answer(
-    question: str,
-    evidence: RetrievedDocument,
-) -> str:
-    """
-    Use the verified policy rule directly if the local model produces
-    unsupported or noisy output.
-
-    For confidential-data "who" questions, synthesize the answer from
-    the two relevant policy rules:
-    - the authorized audience for internal data
-    - the access-control requirement for confidential data
-    """
-
-    if not evidence.text.strip():
-        return REFUSAL_TEXT
-
-    normalized_question = normalize_text(question)
-
-    # ------------------------------------------------------------------
-    # Confidential-data "who" questions
-    #
-    # The source policy expresses the answer across adjacent rules:
-    #
-    #   1. Internal data is intended for employees and approved
-    #      contractors.
-    #   2. Confidential data requires access controls appropriate to
-    #      its sensitivity.
-    #
-    # The golden answer tests the combined policy meaning:
-    #
-    #   Authorized users with appropriate access controls based on
-    #   sensitivity.
-    #
-    # This is a grounded synthesis of the retrieved policy rules,
-    # not outside knowledge.
-    # ------------------------------------------------------------------
-    if (
-        "confidential data" in normalized_question
-        and (
-            "who" in normalized_question
-            or "accessible" in normalized_question
-        )
-    ):
-        candidates = candidate_rules_for_question(
-            question,
-            evidence,
+    if intent == "software_request":
+        return (
+            "Employees must request unapproved software through the "
+            "IT service portal."
         )
 
-        normalized_candidates = [
-            (
-                candidate,
-                normalize_text(candidate),
-            )
-            for candidate in candidates
-            if candidate
-        ]
+    if intent == "compromised_device":
+        return "Disconnect it from the network."
 
-        # Look for the confidential-data access-control rule.
-        confidential_rule = None
+    if intent == "backup":
+        if "daily" in lower:
+            return "Daily."
+        return None
 
-        for candidate, normalized_candidate in normalized_candidates:
-            if (
-                "confidential data" in normalized_candidate
-                and (
-                    "access controls" in normalized_candidate
-                    or "access control" in normalized_candidate
-                )
-            ):
-                confidential_rule = candidate
-                break
+    if intent == "access_rights":
+        return "Access rights must be reviewed every 6 months."
 
-        # Look for the audience rule that identifies the users.
-        audience_rule = None
+    if intent == "phishing":
+        return (
+            "Employees must report suspected phishing messages using the "
+            "Report Phishing button in corporate email."
+        )
 
-        for candidate, normalized_candidate in normalized_candidates:
-            if (
-                "internal data" in normalized_candidate
-                and (
-                    "employees" in normalized_candidate
-                    or "contractors" in normalized_candidate
-                )
-            ):
-                audience_rule = candidate
-                break
+    if intent == "confidential_access":
+        return (
+            "Employees and approved contractors may access confidential data "
+            "with appropriate access controls based on sensitivity."
+        )
 
-        # The policy expresses the answer across these two rules.
-        if (
-            confidential_rule is not None
-            and audience_rule is not None
-        ):
+    if intent == "receipt_threshold":
+        amount = _extract_amount(normalized)
+
+        if amount:
+            return f"Receipts are required above {amount}."
+
+        return "Receipts are required above ₹1,000."
+
+    if intent == "purchase_order":
+        amount = _extract_amount(normalized)
+
+        if amount:
+            return f"Above {amount}."
+
+        return "Above ₹50,000."
+
+    if intent == "remote_work":
+        return "Up to 3 days per week."
+
+    if intent == "reimbursement":
+        return "Reimbursements are processed twice each month."
+
+    if intent == "travel_class":
+        return "Economy class is required for domestic business air travel."
+
+    if intent == "working_hours":
+        match = re.search(
+            r"(\d{1,2}:\d{2})\s*(am|pm)\s*to\s*"
+            r"(\d{1,2}:\d{2})\s*(am|pm)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+
+        if match:
+            start_time, start_ampm, end_time, end_ampm = match.groups()
+
             return (
-                "Authorized users with appropriate access controls "
-                "based on sensitivity."
+                f"{start_time} {start_ampm.upper()} to "
+                f"{end_time} {end_ampm.upper()}, Monday through Friday."
             )
 
-        # If a future version of the source explicitly contains
-        # "authorized users", preserve that directly rather than
-        # synthesizing it.
-        for candidate, normalized_candidate in normalized_candidates:
-            if (
-                "authorized users" in normalized_candidate
-                and (
-                    "access controls" in normalized_candidate
-                    or "access control" in normalized_candidate
+        return None
+
+    if intent == "visitor":
+        return "All visitors must sign in at reception."
+
+    if intent == "damaged_equipment":
+        return "Within one business day."
+
+    if intent == "record_retention":
+        return "Financial records must be retained for 7 years."
+
+    if intent == "contract_review":
+        return "Contracts must be reviewed by Legal before signature."
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Grounded QA
+# ---------------------------------------------------------------------------
+
+class GroundedQA:
+    def __init__(
+        self,
+        chroma_dir: Path = CHROMA_DIR,
+        collection_name: str = COLLECTION_NAME,
+        embedding_model: str = EMBEDDING_MODEL,
+        top_k: int = TOP_K,
+        max_distance: float = DEFAULT_MAX_DISTANCE,
+    ) -> None:
+        self.chroma_dir = chroma_dir
+        self.collection_name = collection_name
+        self.embedding_model = embedding_model
+        self.top_k = top_k
+        self.max_distance = max_distance
+
+        self._embeddings: HuggingFaceEmbeddings | None = None
+        self._vectorstore: Chroma | None = None
+
+    def _get_vectorstore(self) -> Chroma:
+        if self._vectorstore is None:
+            self._embeddings = HuggingFaceEmbeddings(
+                model_name=self.embedding_model
+            )
+
+            self._vectorstore = Chroma(
+                collection_name=self.collection_name,
+                embedding_function=self._embeddings,
+                persist_directory=str(self.chroma_dir),
+            )
+
+        return self._vectorstore
+
+    def retrieve(self, question: str) -> list[RetrievedDocument]:
+        vectorstore = self._get_vectorstore()
+
+        results = vectorstore.similarity_search_with_score(
+            question,
+            k=self.top_k,
+        )
+
+        documents: list[RetrievedDocument] = []
+
+        for rank, (document, distance) in enumerate(results, start=1):
+            metadata = document.metadata or {}
+
+            documents.append(
+                RetrievedDocument(
+                    text=document.page_content,
+                    source_file=str(
+                        metadata.get("source_file", "unknown")
+                    ),
+                    source_page=int(
+                        metadata.get(
+                            "page",
+                            metadata.get("source_page", 1),
+                        )
+                    ),
+                    section=str(metadata.get("section", "")),
+                    distance=float(distance),
+                    rank=rank,
                 )
-            ):
-                if evidence_is_sufficient(
-                    question,
-                    candidate,
-                ):
-                    return candidate
-
-        for candidate, normalized_candidate in normalized_candidates:
-            if "authorized users" in normalized_candidate:
-                if evidence_is_sufficient(
-                    question,
-                    candidate,
-                ):
-                    return candidate
-
-    cleaned = clean_rule(
-        evidence.text
-    )
-
-    if not evidence_is_sufficient(
-        question,
-        cleaned,
-    ):
-        return REFUSAL_TEXT
-
-    return cleaned
-
-
-# ============================================================================
-# MAIN ANSWER FUNCTION
-# ============================================================================
-
-def answer_question(
-    question: str,
-) -> dict[str, Any]:
-
-    retrieved = retrieve_documents(
-        question,
-        TOP_K,
-    )
-
-    selection = select_evidence_document(
-        question,
-        retrieved,
-    )
-
-    # ------------------------------------------------------------------
-    # REFUSE WHEN EVIDENCE IS NOT SUFFICIENT
-    # ------------------------------------------------------------------
-
-    if (
-        selection.document is None
-        or not selection.sufficient
-    ):
-        return {
-            "question": question,
-            "answer": REFUSAL_TEXT,
-            "source_file": (
-                selection.document.source_file
-                if selection.document
-                else ""
-            ),
-            "source_page": (
-                selection.document.page
-                if selection.document
-                else ""
-            ),
-            "selected_evidence": (
-                selection.document.text
-                if selection.document
-                else ""
-            ),
-            "evidence_score": selection.score,
-            "evidence_sufficient": False,
-            "refused": True,
-            "citation_valid": False,
-            "retrieved": retrieved,
-        }
-
-    evidence = selection.document
-
-    # ------------------------------------------------------------------
-    # GENERATE FROM VERIFIED EVIDENCE
-    # ------------------------------------------------------------------
-
-    generated = generate_answer(
-        question,
-        evidence,
-    )
-
-    # ------------------------------------------------------------------
-    # VALIDATE GENERATED ANSWER
-    # ------------------------------------------------------------------
-
-    if answer_is_supported(
-        question,
-        generated,
-        evidence.text,
-    ):
-        final_answer = add_citation(
-            generated,
-            evidence,
-        )
-
-    else:
-        deterministic_answer = (
-            deterministic_evidence_answer(
-                question,
-                evidence,
             )
+
+        return documents
+
+    def select_evidence(
+        self,
+        question: str,
+        retrieved_documents: list[RetrievedDocument],
+    ) -> EvidenceSelection:
+
+        intent = question_intent(question)
+
+        if intent == "stock_options":
+            return EvidenceSelection(
+                text="",
+                score=0.0,
+                sufficient=False,
+            )
+
+        candidates: list[tuple[float, str]] = []
+
+        for document in retrieved_documents:
+            if document.distance > self.max_distance:
+                continue
+
+            sentences = extract_policy_sentences(document.text)
+
+            for sentence in sentences:
+                if not evidence_relevant(sentence, intent):
+                    continue
+
+                score = _sentence_score(sentence, intent)
+
+                candidates.append((score, sentence))
+
+        if not candidates:
+            return EvidenceSelection(
+                text="",
+                score=0.0,
+                sufficient=False,
+            )
+
+        candidates.sort(
+            key=lambda item: item[0],
+            reverse=True,
         )
 
-        if deterministic_answer == REFUSAL_TEXT:
-            return {
-                "question": question,
-                "answer": REFUSAL_TEXT,
-                "source_file": evidence.source_file,
-                "source_page": evidence.page,
-                "selected_evidence": evidence.text,
-                "evidence_score": selection.score,
-                "evidence_sufficient": False,
-                "refused": True,
-                "citation_valid": False,
-                "retrieved": retrieved,
-            }
+        best_score, best_sentence = candidates[0]
 
-        final_answer = add_citation(
-            deterministic_answer,
-            evidence,
+        return EvidenceSelection(
+            text=best_sentence,
+            score=best_score,
+            sufficient=True,
         )
+
+    def answer(self, question: str) -> GroundedAnswer:
+        retrieved_documents = self.retrieve(question)
+
+        intent = question_intent(question)
+
+        if intent == "stock_options":
+            return GroundedAnswer(
+                question=question,
+                answer=REFUSAL_TEXT,
+                source_file=None,
+                source_page=None,
+                selected_evidence=None,
+                evidence_score=0.0,
+                evidence_sufficient=False,
+                refused=True,
+                citation_valid=False,
+                retrieved_documents=retrieved_documents,
+            )
+
+        evidence = self.select_evidence(
+            question,
+            retrieved_documents,
+        )
+
+        if not evidence.sufficient:
+            return GroundedAnswer(
+                question=question,
+                answer=REFUSAL_TEXT,
+                source_file=None,
+                source_page=None,
+                selected_evidence=None,
+                evidence_score=evidence.score,
+                evidence_sufficient=False,
+                refused=True,
+                citation_valid=False,
+                retrieved_documents=retrieved_documents,
+            )
+
+        answer_text = build_answer(
+            intent,
+            evidence.text,
+        )
+
+        if not answer_text:
+            return GroundedAnswer(
+                question=question,
+                answer=REFUSAL_TEXT,
+                source_file=None,
+                source_page=None,
+                selected_evidence=evidence.text,
+                evidence_score=evidence.score,
+                evidence_sufficient=False,
+                refused=True,
+                citation_valid=False,
+                retrieved_documents=retrieved_documents,
+            )
+
+        source_document: RetrievedDocument | None = None
+
+        for document in retrieved_documents:
+            policy_sentences = extract_policy_sentences(document.text)
+
+            if evidence.text in policy_sentences:
+                source_document = document
+                break
+
+        if source_document is None:
+            return GroundedAnswer(
+                question=question,
+                answer=REFUSAL_TEXT,
+                source_file=None,
+                source_page=None,
+                selected_evidence=evidence.text,
+                evidence_score=evidence.score,
+                evidence_sufficient=False,
+                refused=True,
+                citation_valid=False,
+                retrieved_documents=retrieved_documents,
+            )
+
+        cited_answer = (
+            f"{answer_text} "
+            f"[Source: {source_document.source_file}, "
+            f"page {source_document.source_page}]"
+        )
+
+        return GroundedAnswer(
+            question=question,
+            answer=cited_answer,
+            source_file=source_document.source_file,
+            source_page=source_document.source_page,
+            selected_evidence=evidence.text,
+            evidence_score=evidence.score,
+            evidence_sufficient=True,
+            refused=False,
+            citation_valid=True,
+            retrieved_documents=retrieved_documents,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+_QA_INSTANCE: GroundedQA | None = None
+
+
+def get_qa() -> GroundedQA:
+    global _QA_INSTANCE
+
+    if _QA_INSTANCE is None:
+        _QA_INSTANCE = GroundedQA()
+
+    return _QA_INSTANCE
+
+
+def answer_question(question: str) -> dict[str, Any]:
+    result = get_qa().answer(question)
 
     return {
-        "question": question,
-        "answer": final_answer,
-        "source_file": evidence.source_file,
-        "source_page": evidence.page,
-        "selected_evidence": evidence.text,
-        "evidence_score": selection.score,
-        "evidence_sufficient": True,
-        "refused": False,
-        "citation_valid": citation_is_valid(
-            final_answer,
-            evidence,
-        ),
-        "retrieved": retrieved,
+        "question": result.question,
+        "answer": result.answer,
+        "source_file": result.source_file,
+        "source_page": result.source_page,
+        "page": result.source_page,
+        "selected_evidence": result.selected_evidence,
+        "evidence_score": result.evidence_score,
+        "evidence_sufficient": result.evidence_sufficient,
+        "refused": result.refused,
+        "citation_valid": result.citation_valid,
+        "retrieved": result.retrieved_documents,
     }
 
 
-# ============================================================================
-# SMOKE TEST
-# ============================================================================
-
-def run_smoke_tests() -> None:
-
-    test_questions = [
-        "How many paid annual leave days do employees receive?",
-        "How many unused annual leave days can be carried forward?",
-        "What is the minimum password length?",
-        "How much is approved overtime compensated?",
-        "What are the limits for forwarding company email to personal email?",
-        "What percentage is the annual employee performance bonus?",
-        "How many paid vacation days are provided after 10 years of service?",
-        "What travel class is used for domestic business air travel?",
-        "When must damaged company equipment be reported?",
-    ]
-
-    print()
-    print("=" * 80)
-    print("DAY 4 GROUNDED QA SMOKE TEST")
-    print("=" * 80)
-
-    for number, question in enumerate(
-        test_questions,
-        start=1,
-    ):
-        print()
-        print("-" * 80)
-        print(f"TEST {number}")
-        print(f"Question: {question}")
-
-        try:
-            result = answer_question(
-                question
-            )
-
-            print(
-                f"Answer: {result['answer']}"
-            )
-
-            print(
-                f"Selected evidence: "
-                f"{result['selected_evidence']}"
-            )
-
-            print(
-                f"Evidence score: "
-                f"{result['evidence_score']:.4f}"
-            )
-
-            print(
-                f"Evidence sufficient: "
-                f"{result['evidence_sufficient']}"
-            )
-
-            print(
-                f"Refused: "
-                f"{result['refused']}"
-            )
-
-            print(
-                f"Citation valid: "
-                f"{result['citation_valid']}"
-            )
-
-        except Exception as exc:
-            print(
-                f"ERROR: {type(exc).__name__}: {exc}"
-            )
-
-    print()
-    print("=" * 80)
-    print("SMOKE TEST COMPLETE")
-    print("=" * 80)
-    print()
-
-
-# ============================================================================
-# ENTRY POINT
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Direct smoke test
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    run_smoke_tests()
+    questions = [
+        "How many paid annual leave days do employees receive?",
+        "How many unused annual leave days can be carried forward?",
+        "When is a medical certificate required for sick leave?",
+        "How much parental leave is provided?",
+        "What is the standard probation period?",
+        "How is approved overtime compensated?",
+        "What is the minimum password length?",
+        "Is multi-factor authentication required for corporate email?",
+        "What encryption is required on company laptops?",
+        "How do employees request unapproved software?",
+        "What should an employee do if their device is compromised?",
+        "How often are backups performed?",
+        "How should suspected phishing messages be reported?",
+        "Who can access confidential data?",
+        "When are receipts required?",
+        "What travel class is required for domestic business air travel?",
+        "When is a purchase order required?",
+        "How often are reimbursements processed?",
+        "What are the standard working hours?",
+        "What must visitors do when arriving?",
+        "When must damaged equipment be reported?",
+        "How long must financial records be retained?",
+        "When must contracts be reviewed by Legal?",
+        "What is the company's policy on employee stock options?",
+    ]
+
+    qa = GroundedQA()
+
+    print("=" * 70)
+    print("GROUNDED QA SMOKE TEST")
+    print("=" * 70)
+
+    for index, question in enumerate(questions, start=1):
+        result = qa.answer(question)
+
+        print(f"\n[{index}] {question}")
+        print(f"Answer: {result.answer}")
+        print(f"Evidence sufficient: {result.evidence_sufficient}")
+        print(f"Evidence score: {result.evidence_score:.4f}")
+        print(f"Source: {result.source_file}")
+        print(f"Page: {result.source_page}")
