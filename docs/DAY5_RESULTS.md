@@ -37,9 +37,11 @@ These correctness results are measured on the fixed 30-question golden evaluatio
 Generation latency varies by environment and run.
 
 | Run                             | Average generation latency |
-| ------------------------------- | -------------------------: |
-| Previously recorded project run |                 1322.25 ms |
-| Clean-clone verification run    |                 1418.50 ms |
+| ------------------------------- | -------------------------- |
+| Previously recorded project run | 1322.25 ms                 |
+| Clean-clone verification run    | 1418.50 ms                 |
+| Latest Day 5 evaluation run     | 1508.46 ms                 |
+
 
 The first generation request in the clean-clone run took approximately 36.1 seconds while the model was initializing. Subsequent requests were substantially faster. The reported average includes the initialization request, so it should not be interpreted as steady-state response latency.
 
