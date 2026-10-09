@@ -11,3 +11,6 @@ htmlcov/
 .streamlit/secrets.toml
 *.log
 .DS_Store
+
+# Generated Chroma vector database
+storage/chroma/
