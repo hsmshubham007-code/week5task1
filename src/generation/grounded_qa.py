@@ -277,85 +277,44 @@ INTENT_TERMS: dict[str, list[str]] = {
 
 
 def question_intent(question: str) -> str | None:
-    lower = normalize_text(question).lower()
+    """Return the first matching intent, preserving the original priority."""
+    normalized_question = normalize_text(question).lower()
 
-    if any(term in lower for term in INTENT_TERMS["stock_options"]):
-        return "stock_options"
+    intent_priority = (
+        "stock_options",
+        "parental_leave",
+        "leave_carry_forward",
+        "sick_certificate",
+        "probation",
+        "overtime",
+        "annual_leave",
+        "remote_work",
+        "password",
+        "mfa",
+        "laptop_encryption",
+        "software_request",
+        "compromised_device",
+        "backup",
+        "access_rights",
+        "phishing",
+        "confidential_access",
+        "receipt_threshold",
+        "purchase_order",
+        "reimbursement",
+        "travel_class",
+        "working_hours",
+        "visitor",
+        "damaged_equipment",
+        "record_retention",
+        "contract_review",
+    )
 
-    if any(term in lower for term in INTENT_TERMS["parental_leave"]):
-        return "parental_leave"
-
-    if any(term in lower for term in INTENT_TERMS["leave_carry_forward"]):
-        return "leave_carry_forward"
-
-    if any(term in lower for term in INTENT_TERMS["sick_certificate"]):
-        return "sick_certificate"
-
-    if any(term in lower for term in INTENT_TERMS["probation"]):
-        return "probation"
-
-    if any(term in lower for term in INTENT_TERMS["overtime"]):
-        return "overtime"
-
-    if any(term in lower for term in INTENT_TERMS["annual_leave"]):
-        return "annual_leave"
-
-    if any(term in lower for term in INTENT_TERMS["remote_work"]):
-        return "remote_work"
-
-    if any(term in lower for term in INTENT_TERMS["password"]):
-        return "password"
-
-    if any(term in lower for term in INTENT_TERMS["mfa"]):
-        return "mfa"
-
-    if any(term in lower for term in INTENT_TERMS["laptop_encryption"]):
-        return "laptop_encryption"
-
-    if any(term in lower for term in INTENT_TERMS["software_request"]):
-        return "software_request"
-
-    if any(term in lower for term in INTENT_TERMS["compromised_device"]):
-        return "compromised_device"
-
-    if any(term in lower for term in INTENT_TERMS["backup"]):
-        return "backup"
-
-    if any(term in lower for term in INTENT_TERMS["access_rights"]):
-        return "access_rights"
-
-    if any(term in lower for term in INTENT_TERMS["phishing"]):
-        return "phishing"
-
-    if any(term in lower for term in INTENT_TERMS["confidential_access"]):
-        return "confidential_access"
-
-    if any(term in lower for term in INTENT_TERMS["receipt_threshold"]):
-        return "receipt_threshold"
-
-    if any(term in lower for term in INTENT_TERMS["purchase_order"]):
-        return "purchase_order"
-
-    if any(term in lower for term in INTENT_TERMS["reimbursement"]):
-        return "reimbursement"
-
-    if any(term in lower for term in INTENT_TERMS["travel_class"]):
-        return "travel_class"
-
-    if any(term in lower for term in INTENT_TERMS["working_hours"]):
-        return "working_hours"
-
-    if any(term in lower for term in INTENT_TERMS["visitor"]):
-        return "visitor"
-
-    if any(term in lower for term in INTENT_TERMS["damaged_equipment"]):
-        return "damaged_equipment"
-
-    if any(term in lower for term in INTENT_TERMS["record_retention"]):
-        return "record_retention"
-
-    if any(term in lower for term in INTENT_TERMS["contract_review"]):
-        return "contract_review"
+    for intent in intent_priority:
+        if any(
+            term in normalized_question
+            for term in INTENT_TERMS[intent]
+        ):
+            return intent
 
     return None
 
