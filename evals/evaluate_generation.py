@@ -156,8 +156,10 @@ def answer_contains_gold_fact(
     gold_answer: str,
 ) -> bool:
     """
-    Determine whether the generated answer contains the
-    core factual content from the gold answer.
+    Check whether a generated answer contains the gold fact.
+
+    Reject explicit contradictions and negations before
+    checking numeric values and word overlap.
     """
 
     generated_normalized = normalize_text(
@@ -167,6 +169,49 @@ def answer_contains_gold_fact(
     gold_normalized = normalize_text(
         gold_answer
     )
+
+    # Exact matches are accepted only when they contain
+    # no explicit negation.
+    negation_patterns = [
+        r"\bnot\b",
+        r"\bno\b",
+        r"\bnever\b",
+        r"\bneither\b",
+        r"\bwithout\b",
+        r"\bdoesn't\b",
+        r"\bdon't\b",
+        r"\bdidn't\b",
+        r"\bisn't\b",
+        r"\baren't\b",
+        r"\bwasn't\b",
+        r"\bweren't\b",
+        r"\bcannot\b",
+        r"\bcan't\b",
+        r"\bwon't\b",
+        r"\bdoes not\b",
+        r"\bdo not\b",
+        r"\bdid not\b",
+        r"\bis not\b",
+        r"\bare not\b",
+        r"\bwas not\b",
+        r"\bwere not\b",
+    ]
+
+    # A conservative check: if the generated answer contains
+    # explicit negation but the gold answer does not, do not
+    # automatically mark it correct based on word overlap.
+    generated_has_negation = any(
+        re.search(pattern, generated_normalized)
+        for pattern in negation_patterns
+    )
+
+    gold_has_negation = any(
+        re.search(pattern, gold_normalized)
+        for pattern in negation_patterns
+    )
+
+    if generated_has_negation and not gold_has_negation:
+        return False
 
     if generated_normalized == gold_normalized:
         return True
@@ -179,11 +224,10 @@ def answer_contains_gold_fact(
         generated_answer
     )
 
-    if gold_numbers:
-        if not gold_numbers.issubset(
-            generated_numbers
-        ):
-            return False
+    if gold_numbers and not gold_numbers.issubset(
+        generated_numbers
+    ):
+        return False
 
     stop_words = {
         "a",
