@@ -66,6 +66,9 @@ data/golden_set/golden_set.csv
 
 ## 4. Architecture
 
+![RAG System Architecture](docs/Architecture.png)
+
+
 ```text
 PDF Policy Documents
         |
