@@ -334,7 +334,9 @@ week5task1/
 |   |-- DAY1_CORPUS_AUDIT.md
 |   |-- DAY2_INGESTION_AUDIT.md
 |   |-- DAY3_RETRIEVAL_RESULTS.md
-|   `-- DAY4_GENERATION_AUDIT.md
+|   |-- DAY4_GENERATION_AUDIT.md
+|   |-- DAY5_RESULTS.md
+|   `-- Architecture.png
 |
 |-- evals/
 |   |-- evaluate_all.py
@@ -553,31 +555,44 @@ This evaluation has several limitations:
 
 ## 19. Reproducibility
 
-The project records:
+The project includes the source policy documents, golden evaluation set, ingestion and chunking scripts, Chroma database builder, evaluation scripts, recorded results, dependency specifications, and day-by-day audit documentation.
 
-* Source documents
-* Golden evaluation set
-* Extraction output
-* Chunked documents
-* Vector database
-* Evaluation scripts
-* Evaluation CSV results
-* Dependency versions
-* Day-by-day audit documentation
+### Clean-clone setup
 
-The intended clean-clone workflow is:
+Use Python 3.12 and Windows PowerShell. Run these commands in order:
 
 ```powershell
-git clone <repository-url>
+git clone https://github.com/hsmshubham007-code/week5task1.git
 cd week5task1
+
 py -3.12 -m venv venv
 .\venv\Scripts\Activate.ps1
+
 python -m pip install -r .\requirements.txt
+
+python .\src\ingestion\extract_pdfs.py
+python .\src\ingestion\chunk_documents.py
+python .\src\ingestion\build_chroma.py
+
 python .\evals\evaluate_all.py
 python -m streamlit run .\app.py
 ```
 
-No API key is required for the current deterministic grounded QA implementation.
+The extraction, chunking, and database-build steps generate the local artifacts and Chroma database needed by the application. Complete these steps before running the evaluation or starting the UI in a fresh clone.
+
+The first use of the embedding model requires internet access to download the required Hugging Face model files. The current deterministic grounded QA implementation does not require an API key.
+
+### Evaluation output
+
+The full evaluation is run with:
+
+```powershell
+python .\evals\evaluate_all.py
+```
+
+The evaluation output is saved to `evals/results/day5_full_evaluation.csv`.
+
+The evaluator verifies the saved Day 3 retrieval results and freshly evaluates generation against the 30-question golden set. Therefore, the reported retrieval metric comes from the saved Day 3 result; it is not necessarily recalculated by every Day 5 evaluation run.
 
 ---
 
